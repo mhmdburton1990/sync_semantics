@@ -1,0 +1,21 @@
+version: 0.1
+source: main.sales.orders
+joins:
+  - name: customers
+    source: main.sales.customers
+    on: source.customer_id = customers.id
+    unique: true
+dimensions:
+  - name: customer_segment
+    expr: customers.segment
+  - name: order_date
+    expr: source.order_date
+measures:
+  - name: total_sales
+    expr: SUM(source.amount)
+  - name: avg_order_value
+    expr: SUM(source.amount) / COUNT(*)
+  - name: shipped_sales
+    expr: SUM(CASE WHEN source.status = 'shipped' THEN source.amount END)
+  - name: distinct_customers
+    expr: COUNT(DISTINCT source.customer_id)

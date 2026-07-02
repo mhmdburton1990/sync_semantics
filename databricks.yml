@@ -1,0 +1,51 @@
+bundle:
+  name: databricks-to-pbi
+
+# Force-include files that .gitignore excludes but the App needs at runtime.
+sync:
+  include:
+    - frontend/dist/**
+    - uv.lock
+
+targets:
+  # The only target. No host is pinned — the workspace is taken from
+  # whichever CLI profile is passed via `-p <profile>`, so the same bundle
+  # config deploys to any workspace without edits. Customers clone the
+  # repo, run `databricks auth login --host https://...`, then:
+  #     databricks bundle deploy -p <their-profile>
+  dev:
+    mode: development
+    resources:
+      apps:
+        databricks_to_pbi:
+          name: databricks-to-pbi
+          description: "Sync Databricks semantic layer (UC Metric Views, AI/BI dashboards, Genie spaces) into a Power BI semantic model."
+          source_code_path: ${workspace.file_path}
+          # Persist OBO scopes in the bundle so `databricks bundle deploy`
+          # doesn't wipe them on each deploy. (app.yaml's user_authorization
+          # block is the boot-time intent; this is the deploy-time source of
+          # truth that the bundle resource manager enforces.)
+          user_api_scopes:
+            - sql
+            - dashboards.genie
+            - catalog.connections
+          # App-level secret references. The bundle creates these as App
+          # resources so `valueFrom:` in app.yaml can resolve them. The App
+          # service principal needs READ on each scope (granted out-of-band
+          # via `databricks secrets put-acl <scope> <sp-id> READ`).
+          resources:
+            - name: fabric-sp-client-id
+              secret:
+                scope: dbx2pbi-fabric
+                key: fabric-sp-client-id
+                permission: READ
+            - name: fabric-sp-client-secret
+              secret:
+                scope: dbx2pbi-fabric
+                key: fabric-sp-client-secret
+                permission: READ
+            - name: fabric-tenant-id
+              secret:
+                scope: dbx2pbi-fabric
+                key: fabric-tenant-id
+                permission: READ

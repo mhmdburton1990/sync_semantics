@@ -1,0 +1,29 @@
+{
+  "id": "dash-abc-123",
+  "name": "Sales Dashboard",
+  "datasets": [
+    {
+      "id": "ds-orders-by-month",
+      "name": "Orders by Month",
+      "query": "SELECT DATE_TRUNC('MONTH', order_date) AS order_month, SUM(amount) AS total_sales FROM main.sales.orders GROUP BY 1"
+    },
+    {
+      "id": "ds-customer-spend",
+      "name": "Customer Spend",
+      "query": "SELECT customer_id, SUM(amount) AS spend FROM main.sales.orders GROUP BY 1"
+    }
+  ],
+  "widgets": [
+    {
+      "id": "w-aov",
+      "title": "Average Order Value",
+      "dataset_id": "ds-orders-by-month",
+      "calculations": [
+        {
+          "name": "avg_order_value",
+          "expr": "SUM(amount) / COUNT(*)"
+        }
+      ]
+    }
+  ]
+}

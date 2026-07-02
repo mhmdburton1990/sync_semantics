@@ -1,0 +1,27 @@
+{
+  "id": "space-xyz-789",
+  "name": "Sales Genie Space",
+  "instructions": "When asked about trends, use month-over-month percent change. Cohort questions should aggregate by signup_month.",
+  "sample_questions": [
+    "What were last month's sales?",
+    "Which customer segment grew fastest?"
+  ],
+  "example_question_sqls": [
+    {
+      "question": "Last 30 days revenue",
+      "sql": "SELECT SUM(amount) FROM main.sales.orders WHERE order_date >= CURRENT_DATE - INTERVAL 30 DAYS"
+    }
+  ],
+  "metric_definitions": [
+    {
+      "name": "gross_revenue",
+      "expr": "SUM(amount)",
+      "source_table": "main.sales.orders",
+      "description": "Pre-discount revenue"
+    }
+  ],
+  "linked_tables": [
+    "main.sales.orders",
+    "main.sales.customers"
+  ]
+}

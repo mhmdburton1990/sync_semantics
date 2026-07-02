@@ -1,0 +1,14 @@
+version: 0.1
+source: main.sales.orders
+dimensions:
+  - name: order_date
+    expr: order_date
+  - name: order_month
+    expr: DATE_TRUNC('MONTH', order_date)
+measures:
+  - name: total_sales
+    expr: SUM(amount)
+    description: Sum of order amounts
+  - name: order_count
+    expr: COUNT(*)
+    description: Count of orders

@@ -1,0 +1,31 @@
+{
+  "database": {
+    "name": "SalesModel",
+    "model": {
+      "tables": [
+        {
+          "name": "Orders",
+          "annotations": [
+            {"name": "dbx2pbi_source_kind", "value": "metric_view"},
+            {"name": "dbx2pbi_object_hash", "value": "hT-old"}
+          ],
+          "measures": [
+            {
+              "name": "Total Sales",
+              "expression": "SUM('Orders'[amount])",
+              "annotations": [
+                {"name": "dbx2pbi_source_id", "value": "main.sales.orders_mv::Total Sales"},
+                {"name": "dbx2pbi_object_hash", "value": "hM-old"}
+              ]
+            },
+            {
+              "name": "User Added Custom",
+              "expression": "1 + 1",
+              "annotations": []
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

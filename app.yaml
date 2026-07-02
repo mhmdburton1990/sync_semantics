@@ -1,0 +1,91 @@
+name: databricks-to-pbi
+description: Sync Databricks semantic layer (UC Metric Views, AI/BI dashboards, Genie spaces) into a Power BI semantic model.
+
+# OBO scopes the App requests from each user on first login. Only scopes
+# in the Databricks Apps allowlist work here; bare "dashboards"/"genie"
+# are NOT valid (verified via `databricks apps update --json`).
+# - sql:               SQL warehouses + statement execution (metric_view + UC info_schema)
+# - dashboards.genie:  Genie spaces
+# NOTE: Lakeview (AI/BI) dashboards have no public OBO scope yet; the
+# /api/sources/dashboards endpoint will 403 until Databricks exposes one.
+user_authorization:
+  scopes:
+    - sql
+    - dashboards.genie
+    - catalog.connections
+
+command:
+  - python
+  - -m
+  - uvicorn
+  - databricks_to_pbi.app.main:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+
+env:
+  # Make src/ importable since `[tool.uv] package = false` keeps uv from
+  # installing the project as a package.
+  - name: PYTHONPATH
+    value: src
+
+  # Frontend bundle location — relative to the App's working dir at runtime.
+  - name: DBX2PBI_FRONTEND_DIST
+    value: frontend/dist
+
+  # UC volume for manifests + reports + caches. /tmp works for the App's
+  # in-memory lifetime; switch to a real UC volume path
+  # (e.g. /Volumes/main/dbx2pbi/state) once the App's SP has WRITE_VOLUME.
+  - name: DBX2PBI_UC_VOLUME
+    value: /tmp/dbx2pbi/state
+
+  # Run history is a UC Delta table (one row per migration) named
+  # <catalog>.<schema>.run_history, created in the SAME catalog AND schema as
+  # the migrated source — so the schema is guaranteed to exist and inherits
+  # that namespace's governance. The OBO user needs CREATE TABLE on that schema
+  # and MODIFY for inserts/merges. No env var: the namespace is derived per run.
+
+  # Fabric SP credentials for "Publish to Power BI" via XMLA — wired via
+  # bundle resources in databricks.yml (scope: dbx2pbi-fabric).
+  - name: FABRIC_SP_CLIENT_ID
+    valueFrom: fabric-sp-client-id
+  - name: FABRIC_SP_CLIENT_SECRET
+    valueFrom: fabric-sp-client-secret
+  - name: FABRIC_TENANT_ID
+    valueFrom: fabric-tenant-id
+
+  # Original setup runbook (kept for reference):
+  #
+  # The UC POWER_BI connection in the customer workspace is `credential_type:
+  # OAUTH_U2M` — Databricks holds the PBI refresh token server-side and the
+  # SDK doesn't expose it to external clients, so we cannot publish on the
+  # user's behalf via that connection. Instead the App authenticates to Power
+  # BI using a dedicated AAD service principal:
+  #   1. Create an AAD app registration. Grant it Dataset.ReadWrite.All +
+  #      Workspace.ReadWrite.All (admin consent required).
+  #   2. In the Power BI admin portal, enable "Service principals can use
+  #      Fabric APIs" and add the SP as Contributor on target workspaces.
+  #   3. Store the client_id / client_secret in a Databricks secret scope and
+  #      reference them via `valueFrom:` below.
+  #   4. Tenant XMLA writes must also be enabled in the PBI admin portal.
+  #
+  # Without these, GET /api/fabric/workspaces returns a clear
+  # `fabric_sp_not_configured` envelope and the UI surfaces a tooltip.
+  #
+  # - name: FABRIC_SP_CLIENT_ID
+  #   valueFrom: dbx2pbi-fabric-sp-client-id
+  # - name: FABRIC_SP_CLIENT_SECRET
+  #   valueFrom: dbx2pbi-fabric-sp-client-secret
+  # - name: FABRIC_TENANT_ID
+  #   value: <tenant-guid>
+
+  # Other optional env vars (production deploys should wire most of these via
+  # Databricks secrets):
+  #
+  # - name: DBX2PBI_UC_VOLUME
+  #   value: /Volumes/main/dbx2pbi/state
+  # - name: DBX2PBI_WAREHOUSE_ID
+  #   valueFrom: dbx2pbi-warehouse-id
+  # - name: ANTHROPIC_API_KEY
+  #   valueFrom: dbx2pbi-anthropic-key

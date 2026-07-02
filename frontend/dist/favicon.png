@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="sync_semantics — Databricks to Power BI">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22323b"/>
+      <stop offset="1" stop-color="#141f25"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="url(#bg)"/>
+  <!-- Databricks: two stacked diamonds (brand red) -->
+  <g fill="#FF3621">
+    <path d="M15 12 L23 20 L15 28 L7 20 Z"/>
+    <path d="M15 24 L23 32 L15 40 L7 32 Z" fill-opacity="0.62"/>
+  </g>
+  <!-- sync arrow -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24 32 H34"/>
+    <path d="M30 28 L35 32 L30 36"/>
+  </g>
+  <!-- Power BI: three ascending yellow bars -->
+  <g fill="#F2C811">
+    <rect x="40" y="38" width="5.4" height="9" rx="1.4"/>
+    <rect x="47.3" y="31" width="5.4" height="16" rx="1.4"/>
+    <rect x="54.6" y="24" width="5.4" height="23" rx="1.4"/>
+  </g>
+</svg>
