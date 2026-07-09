@@ -1,2 +1,8 @@
 node_modules
 .vite
+
+# Secrets / local credentials — never commit
+.env
+.env.*
+!.env.example
+.npmrc
