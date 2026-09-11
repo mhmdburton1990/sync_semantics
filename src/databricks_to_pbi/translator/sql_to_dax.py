@@ -49,6 +49,8 @@ def translate_measure(
     columns_by_table: dict[str, list[str]],
     cache: TranslationCache,
     client: ClaudeClient | None,
+    keys_by_table: dict[str, str] | None = None,
+    dimensions: dict[str, str] | None = None,
 ) -> TranslationResult:
     key = cache_key(table=table_context, measure_name=measure_name, sql=sql)
 
@@ -56,7 +58,12 @@ def translate_measure(
     if cached is not None:
         return TranslationResult(dax=cached.dax, method="cache", warnings=list(cached.warnings))
 
-    ctx = RuleContext(table=table_context, columns_by_table=columns_by_table)
+    ctx = RuleContext(
+        table=table_context,
+        columns_by_table=columns_by_table,
+        keys_by_table=keys_by_table or {},
+        dimensions=dimensions or {},
+    )
     dax, _rule_name = apply_rules(sql, ctx)
     if dax is not None:
         cache.set(key, dax=dax, method="rule", warnings=[])

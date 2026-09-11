@@ -5,8 +5,11 @@ Indentation is meaningful in TMDL: 4 spaces per level.
 
 from __future__ import annotations
 
+import json
 import re
+import uuid
 from pathlib import Path
+from typing import Any
 
 from databricks_to_pbi.writers.pbi_model import (
     PBIAnnotation,
@@ -200,18 +203,25 @@ def render_expressions_tmdl(params: list[PBIParameter]) -> str:
     """Render model-level M parameters as TMDL `expression` blocks.
 
     Each block carries the IsParameterQuery meta so Power BI Desktop's
-    "Edit Parameters" dialog picks them up on .pbip open.
+    "Edit Parameters" dialog picks them up on .pbip open. A parameter with no
+    value (``default_value is None``) is emitted as ``null`` — a required
+    parameter with no saved value is what makes Desktop prompt the user for it
+    on open. A quoted string (even ``""``) counts as a saved value and would
+    suppress the prompt.
     """
     if not params:
         return ""
     out: list[str] = []
     for p in params:
-        # M string literal escaping: double the quotes inside.
-        default = p.default_value.replace('"', '""')
+        if p.default_value is None:
+            value_expr = "null"
+        else:
+            # M string literal escaping: double the quotes inside.
+            value_expr = '"' + p.default_value.replace('"', '""') + '"'
         if p.description:
             out.extend(f"/// {line}" for line in p.description.splitlines())
         out.append(
-            f'expression {p.name} = "{default}" meta '
+            f"expression {p.name} = {value_expr} meta "
             f'[IsParameterQuery=true, Type="{p.pbi_type}", '
             f"IsParameterQueryRequired=true]"
         )
@@ -219,11 +229,16 @@ def render_expressions_tmdl(params: list[PBIParameter]) -> str:
     return "\n".join(out) + "\n"
 
 
-_CARDINALITY_TO_TMDL = {
-    "one_to_many": "oneToMany",
-    "many_to_one": "manyToOne",
-    "one_to_one": "oneToOne",
-    "many_to_many": "manyToMany",
+# TMDL expresses cardinality as two ends (fromCardinality / toCardinality) with
+# lowercase `one` / `many` — there is no single `cardinality` property (Power BI
+# Desktop rejects the project if one is emitted). The parser defaults are
+# fromCardinality=many, toCardinality=one (i.e. many-to-one), so only non-default
+# ends are written.
+_CARDINALITY_ENDS = {
+    "one_to_many": ("one", "many"),
+    "many_to_one": ("many", "one"),
+    "one_to_one": ("one", "one"),
+    "many_to_many": ("many", "many"),
 }
 
 _CROSS_FILTER_TO_TMDL = {
@@ -259,11 +274,11 @@ def render_relationships_tmdl(rels: list[PBIRelationship]) -> str:
         out.append(f"relationship {_tmdl_name(name)}")
         out.append(f"{_i(1)}fromColumn: {from_ref}")
         out.append(f"{_i(1)}toColumn: {to_ref}")
-        # TOM enums serialize as camelCase in TMDL; convert from the
-        # snake_case form the PBI model carries.
-        card = _CARDINALITY_TO_TMDL.get(r.cardinality, r.cardinality)
-        if card != "manyToOne":  # manyToOne is the parser default
-            out.append(f"{_i(1)}cardinality: {card}")
+        from_card, to_card = _CARDINALITY_ENDS.get(r.cardinality, ("many", "one"))
+        if from_card != "many":  # many is the fromCardinality default
+            out.append(f"{_i(1)}fromCardinality: {from_card}")
+        if to_card != "one":  # one is the toCardinality default
+            out.append(f"{_i(1)}toCardinality: {to_card}")
         cross = _CROSS_FILTER_TO_TMDL.get(r.cross_filter, r.cross_filter)
         if cross and cross != "oneDirection":  # oneDirection is the default
             out.append(f"{_i(1)}crossFilteringBehavior: {cross}")
@@ -330,19 +345,135 @@ def tmdl_parts(model: PBIModel) -> dict[str, bytes]:
     return parts
 
 
+# --- PBIP packaging metadata ------------------------------------------------
+#
+# The SemanticModel TMDL parts (tmdl_parts) are the same ones the Fabric REST
+# publish sends and are already validated. Opening a PBIP in Power BI Desktop
+# additionally needs the packaging files below: a semantic-model definition
+# (definition.pbism), a report (enhanced-PBIR definition folder), git/platform
+# metadata (.platform), and a project entry point (<name>.pbip). Schema-version
+# strings track the public microsoft/json-schemas repo and may need bumping to
+# match a specific Desktop version.
+
+_SCHEMA_ROOT = "https://developer.microsoft.com/json-schemas/fabric"
+_PBIP_SCHEMA = f"{_SCHEMA_ROOT}/pbip/pbipProperties/1.0.0/schema.json"
+_PBISM_SCHEMA = f"{_SCHEMA_ROOT}/item/semanticModel/definitionProperties/1.0.0/schema.json"
+_PBIR_SCHEMA = f"{_SCHEMA_ROOT}/item/report/definitionProperties/2.0.0/schema.json"
+_REPORT_SCHEMA = f"{_SCHEMA_ROOT}/item/report/definition/report/3.3.0/schema.json"
+_VERSION_META_SCHEMA = (
+    f"{_SCHEMA_ROOT}/item/report/definition/versionMetadata/1.0.0/schema.json"
+)
+_PAGES_META_SCHEMA = (
+    f"{_SCHEMA_ROOT}/item/report/definition/pagesMetadata/1.0.0/schema.json"
+)
+_PAGE_SCHEMA = f"{_SCHEMA_ROOT}/item/report/definition/page/2.1.0/schema.json"
+_PLATFORM_SCHEMA = f"{_SCHEMA_ROOT}/gitIntegration/platformProperties/2.0.0/schema.json"
+
+# Fixed namespace so derived UUIDs / page ids are deterministic across runs
+# (a fresh random id every write would churn the .platform files in git).
+_DBX2PBI_NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00cf4fc964ff")
+
+
+def _stable_uuid(model_name: str, item: str) -> str:
+    return str(uuid.uuid5(_DBX2PBI_NS, f"{model_name}/{item}"))
+
+
+def _stable_page_id(model_name: str) -> str:
+    # Enhanced-PBIR page ids are short lowercase-hex strings.
+    return uuid.uuid5(_DBX2PBI_NS, f"{model_name}/page1").hex[:20]
+
+
+def _write_json(path: Path, obj: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
+
+
+def _platform(model_name: str, item_type: str) -> dict[str, Any]:
+    return {
+        "$schema": _PLATFORM_SCHEMA,
+        "metadata": {"type": item_type, "displayName": model_name},
+        "config": {"version": "2.0", "logicalId": _stable_uuid(model_name, item_type)},
+    }
+
+
+def _write_report_definition(report_dir: Path, model: PBIModel) -> None:
+    """Write the enhanced-PBIR report body: one blank page bound to the model."""
+    (report_dir / "definition.pbir").write_text(
+        json.dumps(
+            {
+                "$schema": _PBIR_SCHEMA,
+                "version": "4.0",
+                "datasetReference": {
+                    "byPath": {"path": f"../{model.name}.SemanticModel"},
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rdef = report_dir / "definition"
+    _write_json(
+        rdef / "report.json",
+        {
+            "$schema": _REPORT_SCHEMA,
+            "themeCollection": {
+                "baseTheme": {
+                    "name": "CY26SU02",
+                    "reportVersionAtImport": {
+                        "page": "2.1.0",
+                        "report": "3.3.0",
+                        "visual": "2.9.0",
+                    },
+                    "type": "SharedResources",
+                },
+            },
+        },
+    )
+    _write_json(rdef / "version.json", {"$schema": _VERSION_META_SCHEMA, "version": "2.0.0"})
+    page_id = _stable_page_id(model.name)
+    _write_json(
+        rdef / "pages" / "pages.json",
+        {"$schema": _PAGES_META_SCHEMA, "pageOrder": [page_id], "activePageName": page_id},
+    )
+    _write_json(
+        rdef / "pages" / page_id / "page.json",
+        {
+            "$schema": _PAGE_SCHEMA,
+            "name": page_id,
+            "displayName": "Page 1",
+            "displayOption": "FitToPage",
+            "height": 720,
+            "width": 1280,
+        },
+    )
+
+
 def write_pbip(model: PBIModel, *, output_dir: Path) -> Path:
     sem_dir = output_dir / f"{model.name}.SemanticModel"
     for rel_path, content in tmdl_parts(model).items():
         out = sem_dir / rel_path
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(content)
+    # Semantic-model definition + git metadata alongside the TMDL definition/.
+    _write_json(
+        sem_dir / "definition.pbism",
+        {"$schema": _PBISM_SCHEMA, "version": "4.0", "settings": {}},
+    )
+    _write_json(sem_dir / ".platform", _platform(model.name, "SemanticModel"))
 
     report_dir = output_dir / f"{model.name}.Report"
     report_dir.mkdir(parents=True, exist_ok=True)
-    pbir_content = (
-        '{"version": "1.0", "datasetReference": {"byPath": {"path": "../'
-        + model.name
-        + '.SemanticModel"}}}\n'
+    _write_report_definition(report_dir, model)
+    _write_json(report_dir / ".platform", _platform(model.name, "Report"))
+
+    # Project entry point the user opens in Power BI Desktop.
+    _write_json(
+        output_dir / f"{model.name}.pbip",
+        {
+            "$schema": _PBIP_SCHEMA,
+            "version": "1.0",
+            "artifacts": [{"report": {"path": f"{model.name}.Report"}}],
+        },
     )
-    (report_dir / "definition.pbir").write_text(pbir_content, encoding="utf-8")
     return output_dir

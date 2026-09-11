@@ -7,10 +7,34 @@ import { SourcesPicker } from './SourcesPicker'
 describe('SourcesPicker', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    // This jsdom build ships a stub `localStorage` (a Proxy with no working
+    // methods); the picker reads the selected warehouse from it, so replace it
+    // with a working in-memory one.
+    const store: Record<string, string> = {}
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      value: {
+        getItem: (k: string) => (k in store ? store[k] : null),
+        setItem: (k: string, v: string) => {
+          store[k] = String(v)
+        },
+        removeItem: (k: string) => {
+          delete store[k]
+        },
+        clear: () => {
+          for (const k of Object.keys(store)) delete store[k]
+        },
+      },
+    })
     window.history.replaceState(null, '', '/')
   })
 
   it('lists metric views from the API', async () => {
+    // The metric-view list is gated on a selected warehouse (localStorage) plus
+    // a catalog + schema (URL params); set all three so the query fires.
+    window.localStorage.setItem('dbx2pbi.warehouse_id', 'wh-1')
+    window.history.replaceState(null, '', '/?catalog=main&schema=sales')
+
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/metric_views')) {

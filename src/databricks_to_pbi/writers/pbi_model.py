@@ -76,8 +76,12 @@ class PBIParameter(BaseModel):
     workspaces/warehouses/catalogs/schemas.
     """
 
-    name: str            # M identifier; appears in partition expressions
-    default_value: str   # placeholder shown to the user
+    name: str                  # M identifier; appears in partition expressions
+    # Current value baked into the parameter. When None, the parameter is left
+    # with no value so Power BI Desktop prompts the user for it on open (used
+    # for PBIP/.pbit deliveries); a string is used for direct XMLA publishes so
+    # the Service model refreshes without a manual Edit-Parameters step.
+    default_value: str | None = None
     description: str | None = None
     pbi_type: Literal["Text", "Number", "Logical"] = "Text"
 
@@ -205,12 +209,12 @@ def _build_parameters(
     return [
         PBIParameter(
             name="ServerHostname",
-            default_value=workspace_host or "<set in PBI Desktop>",
+            default_value=workspace_host,
             description=_DEFAULT_PARAMETER_DESCRIPTIONS["ServerHostname"],
         ),
         PBIParameter(
             name="HTTPPath",
-            default_value=http_path or "<set in PBI Desktop>",
+            default_value=http_path,
             description=_DEFAULT_PARAMETER_DESCRIPTIONS["HTTPPath"],
         ),
     ]

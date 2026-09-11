@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from databricks_to_pbi.writers.pbi_model import (
@@ -7,9 +8,49 @@ from databricks_to_pbi.writers.pbi_model import (
     PBIColumn,
     PBIMeasure,
     PBIModel,
+    PBIRelationship,
     PBITable,
 )
-from databricks_to_pbi.writers.tmdl import render_table_tmdl, write_pbip
+from databricks_to_pbi.writers.tmdl import (
+    render_relationships_tmdl,
+    render_table_tmdl,
+    write_pbip,
+)
+
+
+def _rel(cardinality: str, cross_filter: str = "single") -> PBIRelationship:
+    return PBIRelationship(
+        from_table="orders", from_columns=["k"],
+        to_table="dim", to_columns=["k"],
+        cardinality=cardinality, cross_filter=cross_filter,  # type: ignore[arg-type]
+    )
+
+
+def test_render_relationships_never_emits_invalid_cardinality_keyword() -> None:
+    # TMDL has no `cardinality` property on a relationship; Power BI Desktop
+    # rejects the whole project with "cardinality is not a supported property".
+    for card in ("many_to_one", "one_to_many", "one_to_one", "many_to_many"):
+        out = render_relationships_tmdl([_rel(card)])
+        assert "cardinality:" not in out, f"{card} emitted invalid `cardinality:`"
+
+
+def test_render_relationships_many_to_many_uses_from_to_cardinality() -> None:
+    out = render_relationships_tmdl([_rel("many_to_many", cross_filter="both")])
+    assert "toCardinality: many" in out
+    assert "crossFilteringBehavior: bothDirections" in out
+
+
+def test_render_relationships_one_to_many_sets_both_cardinalities() -> None:
+    out = render_relationships_tmdl([_rel("one_to_many")])
+    assert "fromCardinality: one" in out
+    assert "toCardinality: many" in out
+
+
+def test_render_relationships_many_to_one_omits_default_cardinalities() -> None:
+    # many-to-one is the TMDL default, so nothing extra should be emitted.
+    out = render_relationships_tmdl([_rel("many_to_one")])
+    assert "fromCardinality" not in out
+    assert "toCardinality" not in out
 
 
 def test_render_table_tmdl_includes_header_and_columns() -> None:
@@ -110,6 +151,90 @@ def test_write_pbip_is_idempotent_for_unchanged_input(tmp_path: Path) -> None:
     assert first == second
 
 
+def _pbip_model() -> PBIModel:
+    return PBIModel(
+        name="SalesModel", description=None,
+        tables=[
+            PBITable(
+                name="Orders", storage_mode="direct_query", uc_path="main.sales.orders",
+                sql_definition=None, columns=[], measures=[],
+                description=None, annotations=[],
+            ),
+        ],
+        relationships=[], annotations=[],
+    )
+
+
+def test_write_pbip_writes_semantic_model_pbism(tmp_path: Path) -> None:
+    # Required in <name>.SemanticModel/. Its version marks the model as TMDL
+    # (4.x); Desktop won't open a semantic model folder without it.
+    write_pbip(_pbip_model(), output_dir=tmp_path)
+    pbism = tmp_path / "SalesModel.SemanticModel" / "definition.pbism"
+    assert pbism.exists()
+    doc = json.loads(pbism.read_text(encoding="utf-8"))
+    assert doc["version"].startswith("4.")
+
+
+def test_write_pbip_writes_top_level_pbip_entry(tmp_path: Path) -> None:
+    # The <name>.pbip file is what a user double-clicks; it points at the report.
+    write_pbip(_pbip_model(), output_dir=tmp_path)
+    entry = tmp_path / "SalesModel.pbip"
+    assert entry.exists()
+    doc = json.loads(entry.read_text(encoding="utf-8"))
+    assert doc["artifacts"][0]["report"]["path"] == "SalesModel.Report"
+
+
+def test_write_pbip_pbir_is_v4_with_schema_and_bypath(tmp_path: Path) -> None:
+    write_pbip(_pbip_model(), output_dir=tmp_path)
+    pbir = json.loads(
+        (tmp_path / "SalesModel.Report" / "definition.pbir").read_text(encoding="utf-8"),
+    )
+    assert pbir["version"] == "4.0"
+    assert "$schema" in pbir
+    assert pbir["datasetReference"]["byPath"]["path"] == "../SalesModel.SemanticModel"
+
+
+def test_write_pbip_writes_enhanced_pbir_report_body(tmp_path: Path) -> None:
+    # Enhanced PBIR keeps the report content under a definition/ folder. Desktop
+    # needs a report (with at least one page) to open the project.
+    write_pbip(_pbip_model(), output_dir=tmp_path)
+    rdef = tmp_path / "SalesModel.Report" / "definition"
+    report = json.loads((rdef / "report.json").read_text(encoding="utf-8"))
+    assert "$schema" in report
+    version = json.loads((rdef / "version.json").read_text(encoding="utf-8"))
+    assert "version" in version
+    pages = json.loads((rdef / "pages" / "pages.json").read_text(encoding="utf-8"))
+    page_id = pages["pageOrder"][0]
+    page = json.loads(
+        (rdef / "pages" / page_id / "page.json").read_text(encoding="utf-8"),
+    )
+    assert page["name"] == page_id
+    assert page["displayName"]
+
+
+def test_write_pbip_writes_platform_files_for_both_items(tmp_path: Path) -> None:
+    write_pbip(_pbip_model(), output_dir=tmp_path)
+    sem_platform = json.loads(
+        (tmp_path / "SalesModel.SemanticModel" / ".platform").read_text(encoding="utf-8"),
+    )
+    rep_platform = json.loads(
+        (tmp_path / "SalesModel.Report" / ".platform").read_text(encoding="utf-8"),
+    )
+    assert sem_platform["metadata"]["type"] == "SemanticModel"
+    assert rep_platform["metadata"]["type"] == "Report"
+    assert sem_platform["config"]["logicalId"]
+    assert rep_platform["config"]["logicalId"]
+
+
+def test_write_pbip_platform_logical_ids_are_stable(tmp_path: Path) -> None:
+    # logicalId must be deterministic so re-running the sync doesn't churn git.
+    write_pbip(_pbip_model(), output_dir=tmp_path)
+    plat = tmp_path / "SalesModel.SemanticModel" / ".platform"
+    first = plat.read_text(encoding="utf-8")
+    write_pbip(_pbip_model(), output_dir=tmp_path)
+    assert plat.read_text(encoding="utf-8") == first
+
+
 # ---------------------------------------------------------------------------
 # TMDL parameter rendering (WorkspaceHost / HttpPath / CatalogName / SchemaName)
 # ---------------------------------------------------------------------------
@@ -135,6 +260,21 @@ def test_render_expressions_tmdl_emits_parameter_meta() -> None:
     assert "/// Unity Catalog catalog name" in out
     # Second parameter is also present
     assert 'expression HttpPath = "/sql/1.0/warehouses/abc"' in out
+
+
+def test_render_expressions_tmdl_none_value_emits_null_to_prompt() -> None:
+    # A required parameter with no current value renders as `null` (unquoted),
+    # which makes Power BI Desktop prompt "Enter parameter values" on open. A
+    # placeholder string would count as a saved value and suppress the prompt.
+    from databricks_to_pbi.writers.pbi_model import PBIParameter
+    from databricks_to_pbi.writers.tmdl import render_expressions_tmdl
+
+    out = render_expressions_tmdl([PBIParameter(name="ServerHostname", default_value=None)])
+    assert "expression ServerHostname = null meta [IsParameterQuery=true" in out
+    assert "IsParameterQueryRequired=true" in out
+    # The value itself must not be quoted (a quoted "" is still a saved value).
+    value_part = out.split("meta")[0]
+    assert '"' not in value_part
 
 
 def test_render_expressions_tmdl_empty_when_no_params() -> None:
@@ -235,5 +375,7 @@ def test_build_pbi_model_emits_default_parameters_from_first_uc_path() -> None:
     # ServerHostname / HTTPPath — so PBI Service's data-source detector
     # recognises the published model as a Databricks data source.
     assert set(by_name) == {"ServerHostname", "HTTPPath"}
-    assert "set in PBI Desktop" in by_name["ServerHostname"].default_value
-    assert "set in PBI Desktop" in by_name["HTTPPath"].default_value
+    # No host/http_path supplied -> parameters carry no current value, so Power
+    # BI Desktop prompts the user for them on open.
+    assert by_name["ServerHostname"].default_value is None
+    assert by_name["HTTPPath"].default_value is None

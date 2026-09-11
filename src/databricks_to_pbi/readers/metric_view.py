@@ -327,6 +327,36 @@ def _main_table_from_source(source: str, fqn: str) -> tuple[str, str | None, str
     return fqn.split(".")[-1], fqn, None
 
 
+def _primary_key_columns(client: WorkspaceClient, uc_path: str) -> set[str]:
+    """Best-effort: lowercased primary-key column names for a UC table.
+
+    Reads the catalog's ``information_schema``. Returns an empty set on any
+    error (e.g. no access, no constraints defined) so key detection never
+    breaks a sync — callers treat "no keys" as "fall back to COUNTROWS".
+    The join fan-out and case variants in information_schema produce duplicate
+    rows, so the result is deduped case-insensitively.
+    """
+    parts = uc_path.split(".")
+    if len(parts) != 3:
+        return set()
+    catalog, schema, table = parts
+    sql = (
+        "SELECT kcu.column_name "
+        f"FROM {catalog}.information_schema.table_constraints tc "
+        f"JOIN {catalog}.information_schema.key_column_usage kcu "
+        "ON tc.constraint_name = kcu.constraint_name "
+        "AND tc.table_schema = kcu.table_schema "
+        "AND tc.table_name = kcu.table_name "
+        f"WHERE tc.table_schema = '{schema}' AND tc.table_name = '{table}' "
+        "AND tc.constraint_type = 'PRIMARY KEY'"
+    )
+    try:
+        rows = client.run_query(sql)
+    except Exception:
+        return set()
+    return {row[0].lower() for row in rows if row and row[0]}
+
+
 def _fetch_uc_columns(
     client: WorkspaceClient, uc_path: str,
 ) -> list[Column]:
@@ -343,6 +373,7 @@ def _fetch_uc_columns(
         rows = client.describe_columns(uc_path)
     except Exception:
         return []
+    pk_columns = _primary_key_columns(client, uc_path)
     out: list[Column] = []
     seen: set[str] = set()
     for raw_name, dtype in rows:
@@ -362,6 +393,7 @@ def _fetch_uc_columns(
                 source_column=raw_name,
                 uc_path=f"{uc_path}.{name}",
                 data_type=dtype.upper() if dtype else "STRING",
+                is_key=name in pk_columns,
             ),
         )
     return out

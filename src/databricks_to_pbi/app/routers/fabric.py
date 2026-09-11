@@ -19,6 +19,7 @@ XMLA writes enabled at the metastore level), but it's not the auth source.
 from __future__ import annotations
 
 import requests
+from azure.core.exceptions import ClientAuthenticationError
 from fastapi import APIRouter, Depends
 
 from databricks_to_pbi.app.auth import current_obo_token
@@ -73,6 +74,17 @@ def list_workspaces() -> list[FabricWorkspaceSummary]:
             code="fabric_sp_not_configured",
             message=str(exc),
             status_code=400,
+        ) from exc
+    except ClientAuthenticationError as exc:
+        # Azure AD rejected the SP credentials before we ever reach Power BI —
+        # most often an expired/rotated client secret (AADSTS7000222) or a
+        # wrong client_id/tenant_id. Surface Azure's own message so the cause
+        # is visible in the UI instead of collapsing into a bare 500.
+        raise AppError(
+            code="fabric_sp_unauthorized",
+            message="Fabric SP credentials were rejected by Azure AD.",
+            suggestion=(str(exc) or "")[:500],
+            status_code=502,
         ) from exc
 
     resp = requests.get(

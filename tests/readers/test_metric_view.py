@@ -98,3 +98,45 @@ def test_build_relationships_resolves_source_keyword_and_join_alias() -> None:
     assert r.from_columns == ["l_receiptdate"]
     assert r.to_table == "calendar"        # join alias, not basename "dim_calendar"
     assert r.to_columns == ["date"]
+
+
+# ---------------------------------------------------------------------------
+# Primary-key detection from Unity Catalog (marks Column.is_key)
+# ---------------------------------------------------------------------------
+
+
+def test_primary_key_columns_reads_information_schema() -> None:
+    from databricks_to_pbi.readers.metric_view import _primary_key_columns
+
+    client = MagicMock()
+    # information_schema returns duplicate/case-variant rows from join fan-out.
+    client.run_query.return_value = [["O_ORDERKEY"], ["o_orderkey"], ["o_orderkey"]]
+    pks = _primary_key_columns(client, "cat.sch.orders")
+    assert pks == {"o_orderkey"}
+    sql = client.run_query.call_args[0][0]
+    assert "information_schema" in sql
+    assert "PRIMARY KEY" in sql
+    assert "orders" in sql
+
+
+def test_primary_key_columns_empty_on_error() -> None:
+    from databricks_to_pbi.readers.metric_view import _primary_key_columns
+
+    client = MagicMock()
+    client.run_query.side_effect = RuntimeError("no access to information_schema")
+    assert _primary_key_columns(client, "cat.sch.orders") == set()
+
+
+def test_fetch_uc_columns_marks_primary_key() -> None:
+    from databricks_to_pbi.readers.metric_view import _fetch_uc_columns
+
+    client = MagicMock()
+    client.describe_columns.return_value = [
+        ("o_orderkey", "BIGINT"),
+        ("o_totalprice", "DOUBLE"),
+    ]
+    client.run_query.return_value = [["o_orderkey"]]
+    cols = _fetch_uc_columns(client, "cat.sch.orders")
+    by_name = {c.name: c for c in cols}
+    assert by_name["o_orderkey"].is_key is True
+    assert by_name["o_totalprice"].is_key is False

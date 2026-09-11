@@ -8,7 +8,7 @@ Sync the semantic layer in Databricks — Unity Catalog Metric Views, AI/BI (Lak
 
 > ## ⚠️ Disclaimer
 >
-> This is an **open-source project** provided **as-is**. It is **not an official Databricks product and is not supported, endorsed, or warranted by Databricks** in any way. No SLA, support channel, or guarantee is implied. You deploy and run it **at your own risk and responsibility** — review the code, test it against non-production data first, and validate the results before relying on them. You are solely responsible for the security, compliance, and operation of anything you deploy into your own workspace and tenant (including the service-principal credentials you create).
+> This is an **open-source project** provided **as-is**. It is **not an official Databricks product and is not supported, endorsed, or warranted by Databricks** in any way. 
 
 ---
 
@@ -187,6 +187,8 @@ Choose Unity Catalog metric views, AI/BI dashboards, and Genie spaces from one p
 - **PBIP folder** — TMDL files, streamed back as a `.zip`.
 - **`.pbit` template** — single-file template, streamed back.
 
+For the PBIP / `.pbit` formats you open in Power BI Desktop, see [Opening a PBIP or `.pbit` export in Power BI Desktop](#opening-a-pbip-or-pbit-export-in-power-bi-desktop) for the connection parameters you'll need to set.
+
 ![Target setup](docs/screenshots/02-target.png)
 
 ### 3. Preview the translation
@@ -217,6 +219,32 @@ Validation is a confidence check only — it never rolls back a completed publis
 Each Apply writes one row to a Unity Catalog Delta table named `run_history`, created in the **same catalog and schema as the migrated source** (so it inherits that namespace's governance). It records state, translation counts by method, and the validation verdict. Click any run to open its detail view — where you can re-validate — or open a printable **migration confidence report**. Queries run as the signed-in user (OBO), so that user needs `USE CATALOG` on the source catalog and `CREATE TABLE`/`MODIFY` on its schema.
 
 ![Run history](docs/screenshots/07-history.png)
+
+---
+
+## Opening a PBIP or `.pbit` export in Power BI Desktop
+
+The **PBIP folder** and **`.pbit` template** deliveries (from either the App or the CLI) contain the model *schema only* — tables, columns, relationships, and your measures as DAX — with **no data** and **no hardcoded connection**. Each table's query uses the native Databricks connector (`Databricks.Catalogs`) in the storage mode you picked in Preview (DirectQuery / Dual / Import). Catalog, schema, and table names are baked into the model; the connection itself is driven by two **parameters** you fill in on open.
+
+> **Why parameters?** They keep one export portable across workspaces and warehouses — you point it at *your* Databricks without editing any query. The direct **Publish to Power BI** delivery does *not* need this: the App bakes the connection in at publish time, so this step is unique to the PBIP / `.pbit` formats you open in Desktop yourself.
+
+### The two parameters
+
+| Parameter | What it is | Example / where to find it |
+|---|---|---|
+| `ServerHostname` | Your Databricks workspace host, **no `https://`** | `adb-1234567890.11.azuredatabricks.net` (Azure) or `dbc-xxxx.cloud.databricks.com` (AWS/GCP) — the host from your workspace URL |
+| `HTTPPath` | The **SQL warehouse** HTTP path the model connects through | `/sql/1.0/warehouses/<warehouse-id>` — in Databricks: **SQL Warehouses → your warehouse → Connection details → HTTP path** |
+
+Both are exported **empty and required**, so Power BI Desktop prompts you for them the first time you open the model. (Catalog / schema / table are *not* parameters — they're already set from your source.)
+
+### Steps
+
+1. **Open the model.** For a PBIP folder, open the `.pbip` file; for a template, double-click the `.pbit`.
+2. **Fill in the parameters.** Desktop shows an **Edit Parameters** dialog on open — enter `ServerHostname` and `HTTPPath` from the table above, then **OK**. If you aren't prompted, open it manually: **Home → Transform data ▾ → Edit parameters**.
+3. **Sign in to Databricks.** The first connection asks for credentials via the Databricks connector — sign in with **Microsoft Entra / OAuth** (or a personal access token). Manage or reset this later under **File → Options and settings → Data source settings**.
+4. **Load.** Import tables pull data now; DirectQuery / Dual tables connect on demand. Your measures and relationships are already in the model.
+
+**To change the connection later** (e.g. point at a different warehouse or workspace), reopen **Home → Transform data ▾ → Edit parameters** and update the values — no need to touch any query.
 
 ---
 

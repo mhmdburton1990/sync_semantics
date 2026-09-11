@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 __all__ = [
     "RuleContext",
@@ -40,14 +40,34 @@ __all__ = [
 # generates the right DAX form for each.
 # ---------------------------------------------------------------------------
 
-# Matches `col` OR `table.col`. Captured as a single group.
-_COL_REF = r"(?:[A-Za-z_]\w*\.)?[A-Za-z_]\w*"
+# A single identifier: a backtick-quoted name (may contain spaces, e.g.
+# `Order status`) OR a bare SQL identifier.
+_IDENT = r"(?:`[^`]+`|[A-Za-z_]\w*)"
+# Matches `col` OR `table.col` (either segment may be backtick-quoted).
+# Captured as a single group wherever it's wrapped in (...); the internal
+# groups are all non-capturing so existing group numbering is preserved.
+_COL_REF = rf"(?:{_IDENT}\.)?{_IDENT}"
+
+
+def _unbacktick(ref: str) -> str:
+    """Strip a surrounding pair of backticks from an identifier segment."""
+    ref = ref.strip()
+    if len(ref) >= 2 and ref.startswith("`") and ref.endswith("`"):
+        return ref[1:-1]
+    return ref
 
 
 @dataclass(frozen=True, slots=True)
 class RuleContext:
     table: str
     columns_by_table: dict[str, list[str]]
+    # Host-table → its primary-key column name (from UC constraints). Used so
+    # COUNT(*) translates to COUNTA(<key>) — lighter than COUNTROWS in
+    # DirectQuery — falling back to COUNTROWS when no key is known.
+    keys_by_table: dict[str, str] = field(default_factory=dict)
+    # Metric-view dimension name → its SQL expression. Lets FILTER conditions
+    # reference dimension aliases (e.g. a CASE-defined `Order status`).
+    dimensions: dict[str, str] = field(default_factory=dict)
 
     def qualify(self, ref: str) -> str:
         """Quote a column reference into DAX form.
@@ -55,14 +75,17 @@ class RuleContext:
         - `col`        → `'host_table'[col]` (checked against host columns list)
         - `table.col`  → `'table'[col]`       (no existence check; we usually
                                               don't know the joined table's cols)
+
+        Backtick-quoted segments (``\\`Order status\\```) are unquoted first.
         """
-        if "." in ref:
+        if "." in ref and not ref.strip().startswith("`"):
             table, _, col = ref.partition(".")
-            return f"'{table}'[{col}]"
+            return f"'{_unbacktick(table)}'[{_unbacktick(col)}]"
+        col = _unbacktick(ref)
         cols = self.columns_by_table.get(self.table, [])
-        if cols and ref not in cols:
-            raise ValueError(f"column {ref!r} not found on table {self.table!r}")
-        return f"'{self.table}'[{ref}]"
+        if cols and col not in cols:
+            raise ValueError(f"column {col!r} not found on table {self.table!r}")
+        return f"'{self.table}'[{col}]"
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +135,11 @@ def rule_count(sql: str, ctx: RuleContext) -> str | None:
 def rule_count_star(sql: str, ctx: RuleContext) -> str | None:
     if not _AGG_RE["count_star"].match(sql):
         return None
+    # COUNTA on the primary key is cheaper than COUNTROWS in DirectQuery; use it
+    # when the key is known, else fall back so COUNT(*) still translates.
+    key = ctx.keys_by_table.get(ctx.table)
+    if key:
+        return f"COUNTA('{ctx.table}'[{key}])"
     return f"COUNTROWS('{ctx.table}')"
 
 
@@ -736,11 +764,90 @@ def _split_top_level(s: str, keyword: str) -> list[str]:
     return parts
 
 
+def _lookup_dimension(ctx: RuleContext, name: str) -> str | None:
+    """Case-insensitive lookup of a metric-view dimension's SQL expression."""
+    lname = name.lower()
+    for dname, expr in ctx.dimensions.items():
+        if dname.lower() == lname:
+            return expr
+    return None
+
+
+def _as_simple_col(expr: str) -> str | None:
+    """Return the column ref if ``expr`` is a plain ``col`` / ``table.col``
+    (after dropping any ``source.`` prefix), else None."""
+    e = expr.strip().replace("source.", "")
+    return e if re.fullmatch(_COL_REF, e) else None
+
+
+def _invert_case_equality(
+    case_expr: str, op: str, target: str, ctx: RuleContext,
+) -> str | None:
+    """Invert ``CASE … END <op> 'target'`` to a predicate on the underlying
+    columns. Supports ``=`` / ``!=`` / ``<>``; other shapes → None (manual
+    review). e.g. ``CASE WHEN s='O' THEN 'Open' … END = 'Open'`` → ``s = "O"``.
+    """
+    if op not in {"=", "!=", "<>"}:
+        return None
+    m = re.match(r"^\s*CASE\s+(?P<branches>.+?)\s+END\s*$", case_expr, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    parsed = _parse_case_branches(m.group("branches"))
+    if parsed is None:
+        return None
+    pairs, _else_expr = parsed
+    target_val = target.replace("''", "'")
+    conds: list[str] = []
+    for cond, then_expr in pairs:
+        te = then_expr.strip()
+        if not re.fullmatch(_STR_LIT, te):
+            return None  # non-literal THEN — can't invert cleanly
+        if te[1:-1].replace("''", "'") == target_val:
+            conds.append(cond)
+    if not conds:
+        return None  # target only reachable via ELSE / not produced — bail out
+    translated: list[str] = []
+    for c in conds:
+        t = _translate_condition(c, ctx)
+        if t is None:
+            return None
+        translated.append(t)
+    combined = translated[0] if len(translated) == 1 else " || ".join(f"({t})" for t in translated)
+    return f"NOT({combined})" if op in {"!=", "<>"} else combined
+
+
+def _translate_dimension_condition(cond: str, ctx: RuleContext) -> str | None:
+    """If ``cond`` compares a metric-view dimension alias to a string literal,
+    resolve the dimension to its underlying column(s). Returns None when the
+    left side isn't a known dimension (so the physical-column path runs)."""
+    m = _COND_OP_STR.match(cond)
+    if not m:
+        return None
+    ref, op, lit_raw = m.group(1), m.group(2), m.group(3)
+    expr = _lookup_dimension(ctx, _unbacktick(ref))
+    if expr is None:
+        return None
+    if re.match(r"^\s*CASE\b", expr.strip(), re.IGNORECASE):
+        return _invert_case_equality(expr, op, lit_raw[1:-1], ctx)
+    simple = _as_simple_col(expr)
+    if simple is not None:
+        dax_op = "<>" if op in {"!=", "<>"} else "="
+        return f"{ctx.qualify(simple)} {dax_op} {_quote_lit(lit_raw[1:-1])}"
+    return None  # dimension expression too complex — fall through to review
+
+
 def _translate_atomic(cond: str, ctx: RuleContext) -> str | None:
     """Translate a single (non-composite) condition."""
     cond = cond.strip()
     if not cond:
         return None
+
+    # Dimension alias on the left (e.g. a CASE-defined `Order status`)? Resolve
+    # it to the underlying column(s) before the physical-column patterns run.
+    if ctx.dimensions:
+        dim_dax = _translate_dimension_condition(cond, ctx)
+        if dim_dax is not None:
+            return dim_dax
 
     # IS [NOT] NULL
     m = _COND_IS_NULL.match(cond)

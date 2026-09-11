@@ -854,3 +854,57 @@ def test_tpch_pbi_mv_known_measures_still_translate_via_rules() -> None:
     for sql, expected in cases.items():
         dax, rule = apply_rules(sql, ctx)
         assert dax == expected, f"{sql} -> {dax!r} via {rule}"
+
+
+# ---------------------------------------------------------------------------
+# COUNT(*) -> COUNTA(primary key); backtick + dimension-aware FILTER conditions
+# ---------------------------------------------------------------------------
+
+
+def _orders_ctx(**kw: object) -> RuleContext:
+    return RuleContext(
+        table="orders",
+        columns_by_table={"orders": ["o_orderkey", "o_orderstatus", "o_totalprice"]},
+        **kw,  # type: ignore[arg-type]
+    )
+
+
+def test_rule_count_star_uses_counta_on_key_when_known() -> None:
+    ctx = _orders_ctx(keys_by_table={"orders": "o_orderkey"})
+    assert rule_count_star("COUNT(*)", ctx) == "COUNTA('orders'[o_orderkey])"
+
+
+def test_rule_count_star_falls_back_to_countrows_without_key() -> None:
+    assert rule_count_star("COUNT(*)", _orders_ctx()) == "COUNTROWS('orders')"
+
+
+def test_filter_on_backtick_physical_column() -> None:
+    ctx = _orders_ctx(keys_by_table={"orders": "o_orderkey"})
+    dax, _ = apply_rules("COUNT(*) FILTER (WHERE `o_orderstatus` = 'O')", ctx)
+    assert dax == "CALCULATE(COUNTA('orders'[o_orderkey]), 'orders'[o_orderstatus] = \"O\")"
+
+
+def test_filter_on_case_dimension_inverts_to_underlying_column() -> None:
+    ctx = _orders_ctx(
+        keys_by_table={"orders": "o_orderkey"},
+        dimensions={
+            "Order status": (
+                "CASE WHEN o_orderstatus = 'O' THEN 'Open' "
+                "WHEN o_orderstatus = 'P' THEN 'Processing' "
+                "WHEN o_orderstatus = 'F' THEN 'Fulfilled' END"
+            ),
+        },
+    )
+    dax, _ = apply_rules("COUNT(*) FILTER (WHERE `Order status` = 'Open')", ctx)
+    assert dax == "CALCULATE(COUNTA('orders'[o_orderkey]), 'orders'[o_orderstatus] = \"O\")"
+
+
+def test_filter_on_simple_column_dimension() -> None:
+    ctx = _orders_ctx(
+        keys_by_table={"orders": "o_orderkey"},
+        dimensions={"Customer Segment": "customer.c_mktsegment"},
+    )
+    dax, _ = apply_rules(
+        "SUM(o_totalprice) FILTER (WHERE `Customer Segment` = 'BUILDING')", ctx,
+    )
+    assert dax == "CALCULATE(SUM('orders'[o_totalprice]), 'customer'[c_mktsegment] = \"BUILDING\")"

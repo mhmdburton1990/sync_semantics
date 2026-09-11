@@ -5,10 +5,13 @@
 //   2. Type the model name (existing or new)
 //   3. Optionally toggle XMLA merge (preserve user-authored objects)
 //
-// PBIP / .pbit deliveries also still work — toggle the delivery format at
-// the top and the picker switches to a local output path.
+// PBIP delivery also works — toggle the delivery format at the top and the
+// picker switches to a local output path. (The .pbit template format is not
+// offered in the UI: hand-authored .pbit packages don't reliably open in
+// Power BI Desktop. The CLI/back end can still emit one.)
 
 import { PageHeader } from './SourcesPicker'
+import { ApiClientError } from '../api'
 import { useFabricWorkspaces } from '../lib/queryClient'
 import { useUrlParam } from '../lib/url-state'
 import type { DeliveryKind } from '../types'
@@ -22,7 +25,6 @@ const DELIVERY_OPTIONS: Array<{
 }> = [
   { key: 'xmla', label: 'Publish to Power BI', hint: 'Push directly to a Fabric workspace via XMLA' },
   { key: 'pbip', label: 'PBIP folder', hint: 'TMDL files you open in Power BI Desktop' },
-  { key: 'pbit', label: '.pbit template', hint: 'Single template file for sharing' },
 ]
 
 
@@ -30,14 +32,14 @@ export function TargetSetup(): JSX.Element {
   const workspaces = useFabricWorkspaces()
   const [kind, setKind] = useUrlParam<DeliveryKind>('kind', 'xmla')
   const [workspace, setWorkspace] = useUrlParam<string>('workspace', '')
-  const [targetId, setTargetId] = useUrlParam<string>('target_id', '')
   const [modelName, setModelName] = useUrlParam<string>('model_name', '')
   const [xmlaMerge, setXmlaMerge] = useUrlParam<string>('xmla_merge', 'false')
 
   // For XMLA, target_id is the Power BI workspace the Fabric SP publishes to;
-  // auth comes from the SP creds wired through app.yaml secrets. For pbip/pbit,
-  // target_id is a local path.
-  const effectiveTargetId = kind === 'xmla' ? workspace : targetId
+  // auth comes from the SP creds wired through app.yaml secrets. For PBIP the
+  // server rewrites the output path into the App container's /tmp, so there's
+  // nothing for the user to enter — we just carry the model name through.
+  const effectiveTargetId = kind === 'xmla' ? workspace : modelName
 
   const canProceed = !!effectiveTargetId && !!modelName
 
@@ -50,9 +52,10 @@ export function TargetSetup(): JSX.Element {
     // /preview which defaults to PBIP → the engine silently writes a local
     // PBIP folder instead of publishing.
     p.set('kind', kind)
-    if (kind === 'xmla') {
-      p.set('target_id', workspace)
-    }
+    // Carry a target_id downstream: the workspace for XMLA, the model name for
+    // PBIP (the server rewrites the PBIP path anyway, but the apply request
+    // still expects a non-empty target).
+    p.set('target_id', kind === 'xmla' ? workspace : modelName)
     return `/preview?${p.toString()}`
   })()
 
@@ -134,9 +137,27 @@ export function TargetSetup(): JSX.Element {
               )}
               {workspaces.error && (
                 <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                  Couldn't list Fabric workspaces. Confirm the App has Fabric SP
-                  credentials configured and the SP has at least Contributor on
-                  your target workspaces (tenant XMLA write must also be enabled).
+                  {(() => {
+                    // Prefer the backend's structured envelope so the actual
+                    // cause (e.g. an expired SP secret — AADSTS7000222) reaches
+                    // the user, not a one-size-fits-all banner. Fall back to the
+                    // generic guidance for non-envelope errors (network, etc.).
+                    const envelope =
+                      workspaces.error instanceof ApiClientError
+                        ? workspaces.error.envelope
+                        : null
+                    return (
+                      <>
+                        <p className="font-medium">
+                          {envelope?.message ??
+                            "Couldn't list Fabric workspaces. Confirm the App has Fabric SP credentials configured and the SP has at least Contributor on your target workspaces (tenant XMLA write must also be enabled)."}
+                        </p>
+                        {envelope?.suggestion && (
+                          <p className="mt-1 text-amber-700">{envelope.suggestion}</p>
+                        )}
+                      </>
+                    )
+                  })()}
                 </div>
               )}
               {!workspaces.isLoading && !workspaces.error && (
@@ -190,23 +211,8 @@ export function TargetSetup(): JSX.Element {
         </div>
       ) : (
         <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-card">
-          <SectionHeader
-            title={kind === 'pbit' ? '.pbit output file' : 'PBIP output folder'}
-          />
+          <SectionHeader title="PBIP output folder" />
           <div className="space-y-3">
-            <Field label="Output path">
-              <input
-                type="text"
-                value={targetId}
-                onChange={(e) => setTargetId(e.target.value)}
-                placeholder={kind === 'pbit' ? '/path/Model.pbit' : '/path/Model/'}
-                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm focus:border-databricks-red focus:outline-none focus:ring-2 focus:ring-databricks-red/20"
-              />
-              <div className="mt-1 text-xs text-slate-500">
-                Server rewrites this path to <code className="rounded bg-slate-100 px-1">/tmp</code>{' '}
-                inside the App container — you'll get a ZIP download after Apply.
-              </div>
-            </Field>
             <Field label="Model name">
               <input
                 type="text"
@@ -214,6 +220,10 @@ export function TargetSetup(): JSX.Element {
                 onChange={(e) => setModelName(e.target.value)}
                 className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-databricks-red focus:outline-none focus:ring-2 focus:ring-databricks-red/20"
               />
+              <div className="mt-1 text-xs text-slate-500">
+                The PBIP is built inside the App container — you'll get a ZIP
+                download after Apply.
+              </div>
             </Field>
           </div>
         </div>

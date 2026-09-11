@@ -83,6 +83,37 @@ def test_apply_writes_pbip_and_persists_manifest(tmp_path: Path) -> None:
     assert report.mode == "apply"
 
 
+def test_pbip_leaves_connection_params_unset_to_prompt(tmp_path: Path) -> None:
+    # Even when the runtime knows the Databricks host + HTTP path, a PBIP/.pbit
+    # is opened by end users in Desktop who each supply their own connection —
+    # so the WorkspaceHost / HTTPPath parameters must be left unset (prompt on
+    # open), not baked with the build machine's values.
+    from databricks_to_pbi.sync.engine import SyncInputsMulti, run_sync_multi
+
+    out_dir = tmp_path / "out"
+    target = TargetDescriptor(kind="pbip", target_id=str(out_dir))
+    cache = TranslationCache(path=tmp_path / "uc_volume" / "caches" / "sql_to_dax.json")
+    run_sync_multi(
+        inputs=SyncInputsMulti(
+            partial_irs=[_ir()],
+            target=target,
+            mode="apply",
+            target_model_name="Sales",
+            workspace_host="myworkspace.cloud.databricks.com",
+            http_path="/sql/1.0/warehouses/deadbeef1234",
+        ),
+        cache=cache,
+        uc_volume_root=tmp_path / "uc_volume",
+        claude=None,
+    )
+    expr = (out_dir / "Sales.SemanticModel" / "definition" / "expressions.tmdl").read_text()
+    assert "expression ServerHostname = null" in expr
+    assert "expression HTTPPath = null" in expr
+    # The build machine's real connection values must not be baked in.
+    assert "myworkspace.cloud.databricks.com" not in expr
+    assert "deadbeef1234" not in expr
+
+
 def test_second_apply_is_unchanged_when_inputs_identical(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
     target = TargetDescriptor(kind="pbip", target_id=str(out_dir))

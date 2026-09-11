@@ -161,6 +161,14 @@ def _translate_all(
     claude: ClaudeClient | None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
     cols = _columns_by_table(ir)
+    # Host-table primary keys (COUNT(*) → COUNTA(key)) and dimension aliases
+    # (so FILTER conditions can reference a CASE-defined dimension).
+    keys: dict[str, str] = {}
+    for t in ir.tables:
+        key_col = next((c.name for c in t.columns if c.is_key), None)
+        if key_col:
+            keys[t.name] = key_col
+    dimensions = {d.name: d.expression for d in ir.dimensions}
     translations: dict[str, str] = {}
     methods: dict[str, str] = {}
     warnings_by_name: dict[str, list[str]] = {}
@@ -173,6 +181,8 @@ def _translate_all(
             columns_by_table=cols,
             cache=cache,
             client=claude,
+            keys_by_table=keys,
+            dimensions=dimensions,
         )
         if m.window:
             date_ref = _window_date_ref(ir, m.window[0].order)
@@ -282,12 +292,20 @@ def _run_sync_inner(
     delivery: Literal["xmla_create", "xmla_merge", "pbip", "pbit"] = "pbip"
     published_dataset_id: str | None = None
     if mode == "apply":
+        # PBIP / .pbit are opened in Power BI Desktop by end users, who each
+        # supply their own Databricks connection — so leave WorkspaceHost /
+        # HTTPPath unset (Desktop prompts for them on open). A direct XMLA
+        # publish keeps the runtime values so the Service model refreshes
+        # without a manual Edit-Parameters step.
+        is_desktop_delivery = target.kind in ("pbip", "pbit")
+        param_host = None if is_desktop_delivery else workspace_host
+        param_http = None if is_desktop_delivery else http_path
         pbi = build_pbi_model(
             ir,
             measure_dax=translations,
             synced_at=started,
-            workspace_host=workspace_host,
-            http_path=http_path,
+            workspace_host=param_host,
+            http_path=param_http,
             storage_mode_overrides=storage_mode_overrides or {},
         )
         delivery_label, published_dataset_id = _dispatch_apply(

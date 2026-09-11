@@ -40,7 +40,9 @@ def test_pbit_delivery_produces_valid_zip(
     assert result.exit_code == 0, result.output
     assert out.exists()
 
-    with zipfile.ZipFile(out) as zf, zf.open("DataModel") as f:
-        data = json.loads(f.read().decode("utf-8"))
+    # A .pbit template carries the model schema in `DataModelSchema` (UTF-16LE
+    # with a BOM), not a binary `DataModel` part.
+    with zipfile.ZipFile(out) as zf:
+        data = json.loads(zf.read("DataModelSchema").decode("utf-16"))
     assert data["name"] == "Sales"
     assert any(t["name"] == "orders" for t in data["model"]["tables"])

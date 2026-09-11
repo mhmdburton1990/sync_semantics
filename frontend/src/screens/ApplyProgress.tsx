@@ -100,7 +100,7 @@ export function ApplyProgress(): JSX.Element {
             <PowerBiMark className="h-10 w-10 animate-pulse" />
           </div>
           <div className="mt-3 text-center text-sm font-medium text-databricks-ink">
-            Pushing the model
+            {kind === 'xmla' ? 'Pushing the model' : 'Generating the model'}
           </div>
         </div>
       )}

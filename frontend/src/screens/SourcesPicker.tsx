@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
   useCatalogs,
-  useDashboards,
-  useGenieSpaces,
   useMetricViews,
   useSchemas,
 } from '../lib/queryClient'
@@ -12,21 +10,13 @@ import type { SourceKind } from '../types'
 import { DatabricksMark } from '../components/BrandMarks'
 
 
+// Only metric views are offered for now; dashboards and Genie spaces are
+// intentionally not listed (the reader/back end still supports them).
 const TABS: Array<{ key: SourceKind; label: string; description: string }> = [
   {
     key: 'metric_view',
     label: 'Metric Views',
     description: 'Unity Catalog metric views (curated measures + dimensions)',
-  },
-  {
-    key: 'dashboard',
-    label: 'Dashboards',
-    description: 'AI/BI Lakeview dashboards — datasets + custom calculations',
-  },
-  {
-    key: 'genie_space',
-    label: 'Genie Spaces',
-    description: 'Genie spaces — instructions, metric defs, example SQLs',
   },
 ]
 
@@ -34,8 +24,6 @@ const TABS: Array<{ key: SourceKind; label: string; description: string }> = [
 export function SourcesPicker(): JSX.Element {
   const [active, setActive] = useState<SourceKind>('metric_view')
   const [selectedMVs, setSelectedMVs] = useUrlList('mv')
-  const [selectedDashes, setSelectedDashes] = useUrlList('dash')
-  const [selectedSpaces, setSelectedSpaces] = useUrlList('space')
   const [catalog, setCatalog] = useUrlParam<string>('catalog', '')
   const [schema, setSchema] = useUrlParam<string>('schema', '')
 
@@ -51,10 +39,8 @@ export function SourcesPicker(): JSX.Element {
   const catalogs = useCatalogs()
   const schemas = useSchemas(catalog || null)
   const mvs = useMetricViews(catalog || undefined, schema || undefined)
-  const dashes = useDashboards()
-  const spaces = useGenieSpaces()
 
-  const totalSelected = selectedMVs.length + selectedDashes.length + selectedSpaces.length
+  const totalSelected = selectedMVs.length
 
   function toggle(list: string[], setter: (v: string[]) => void, id: string): void {
     setter(list.includes(id) ? list.filter((x) => x !== id) : [...list, id])
@@ -177,24 +163,6 @@ export function SourcesPicker(): JSX.Element {
               />
             )}
           </>
-        )}
-        {active === 'dashboard' && (
-          <SourceList
-            items={(dashes.data ?? []).map((d) => ({ id: d.id, label: d.name, hint: d.owner }))}
-            selected={selectedDashes}
-            onToggle={(id) => toggle(selectedDashes, setSelectedDashes, id)}
-            loading={dashes.isLoading}
-            error={dashes.error}
-          />
-        )}
-        {active === 'genie_space' && (
-          <SourceList
-            items={(spaces.data ?? []).map((s) => ({ id: s.id, label: s.name, hint: s.owner }))}
-            selected={selectedSpaces}
-            onToggle={(id) => toggle(selectedSpaces, setSelectedSpaces, id)}
-            loading={spaces.isLoading}
-            error={spaces.error}
-          />
         )}
       </div>
     </div>

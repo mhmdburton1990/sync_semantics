@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from azure.core.exceptions import ClientAuthenticationError
 from fastapi.testclient import TestClient
 
 from databricks_to_pbi.app.main import create_app
@@ -124,3 +125,31 @@ def test_workspaces_403_from_pbi_surfaces_forbidden(
 
     assert resp.status_code == 502
     assert resp.json()["code"] == "fabric_sp_forbidden"
+
+
+def test_workspaces_expired_secret_surfaces_unauthorized_with_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Azure token acquisition failing (e.g. expired secret) → 502 with the
+    unauthorized envelope and the underlying AADSTS detail surfaced, not a
+    bare 500."""
+    monkeypatch.setenv("FABRIC_SP_CLIENT_ID", "cid")
+    monkeypatch.setenv("FABRIC_SP_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("FABRIC_TENANT_ID", "tid")
+
+    aadsts = (
+        "Authentication failed: AADSTS7000222: The provided client secret "
+        "keys for app 'xxx' are expired. Visit the Azure portal to create "
+        "new keys for your app."
+    )
+    with patch(
+        "databricks_to_pbi.app.routers.fabric.FabricAuth.bearer_token",
+        side_effect=ClientAuthenticationError(message=aadsts),
+    ):
+        resp = client.get("/api/fabric/workspaces", headers=_hdrs())
+
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["code"] == "fabric_sp_unauthorized"
+    # The real Azure cause must reach the client so the UI can show it.
+    assert "AADSTS7000222" in (body["suggestion"] or "")
